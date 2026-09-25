@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { generateCommercialProductContent } from "@/lib/ai/commercial-product";
 
 export const runtime = "nodejs";
 
@@ -87,13 +88,85 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const title =
-      `TECHNOMARINE ${product.collection || product.series || "WATCH"} ${
-        product.gender || ""
-      } ${product.case_size || ""} - ${product.sku}`
-        .replace(/\s+/g, " ")
-        .trim()
-        .toUpperCase();
+    // Protección anti-duplicados:
+    // antes de generar contenido o crear el producto, verificamos
+    // si Shopify ya tiene una variante con este SKU.
+    const duplicateQuery = `
+      query FindProductBySku($query: String!) {
+        productVariants(first: 10, query: $query) {
+          nodes {
+            id
+            sku
+            product {
+              id
+              title
+              handle
+              status
+            }
+          }
+        }
+      }
+    `;
+
+    const duplicateResponse = await fetch(
+      `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": accessToken,
+        },
+        body: JSON.stringify({
+          query: duplicateQuery,
+          variables: {
+            query: `sku:${product.sku}`,
+          },
+        }),
+      }
+    );
+
+    const duplicateResult = await duplicateResponse.json();
+
+    if (!duplicateResponse.ok || duplicateResult.errors?.length) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "No pudimos verificar si el SKU ya existe en Shopify.",
+          details: duplicateResult.errors || duplicateResult,
+        },
+        { status: 502 }
+      );
+    }
+
+    const existingVariant =
+      duplicateResult.data?.productVariants?.nodes?.find(
+        (variant: { sku?: string | null }) =>
+          String(variant?.sku || "").trim().toUpperCase() ===
+          product.sku.trim().toUpperCase()
+      );
+
+    if (existingVariant) {
+      return NextResponse.json(
+        {
+          ok: false,
+          duplicate: true,
+          error: `${product.sku} ya existe en Shopify. No se creó un duplicado.`,
+          shopify: {
+            productId: existingVariant.product?.id,
+            variantId: existingVariant.id,
+            title: existingVariant.product?.title,
+            handle: existingVariant.product?.handle,
+            status: existingVariant.product?.status,
+          },
+        },
+        { status: 409 }
+      );
+    }
+
+    const commercialContent =
+      await generateCommercialProductContent(product);
+
+    const title = commercialContent.title;
 
     const specs = [
       ["SKU", product.sku],
@@ -108,7 +181,15 @@ export async function POST(request: NextRequest) {
       ["Material del dial", product.dial_material],
       ["Calibre", product.caliber],
       ["Movimiento", product.movement],
-      ["Resistencia al agua", product.water_resistance],
+      [
+        "Resistencia al agua",
+        product.water_resistance &&
+        /^(\d+(?:\.\d+)?)\s*(ATM|BAR|M|METERS?|METROS?)$/i.test(
+          String(product.water_resistance).trim()
+        )
+          ? product.water_resistance
+          : null,
+      ],
       ["Material de correa", product.band_material],
       ["Color de correa", product.band_tone],
       ["Largo de correa", product.band_length],
@@ -123,7 +204,7 @@ export async function POST(request: NextRequest) {
       .join("");
 
     const descriptionHtml = `
-      <p>${product.description || ""}</p>
+      ${commercialContent.descriptionHtml}
       <h3>Detalles técnicos</h3>
       <ul>${specificationsHtml}</ul>
     `;
@@ -340,6 +421,12 @@ export async function POST(request: NextRequest) {
       },
       images: imageUrls.length,
       price: "NO ENVIADO",
+      ai: {
+        generated: true,
+        title: commercialContent.title,
+        shortDescription: commercialContent.shortDescription,
+        validation: commercialContent.validation,
+      },
     });
   } catch (error) {
     console.error("Error enviando producto a Shopify:", error);
