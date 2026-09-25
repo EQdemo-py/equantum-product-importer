@@ -88,12 +88,15 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Protección anti-duplicados:
-    // antes de generar contenido o crear el producto, verificamos
-    // si Shopify ya tiene una variante con este SKU.
+    // Protección anti-duplicados en dos niveles:
+    // 1. SKU real de la variante.
+    // 2. custom.source_sku guardado desde el momento de crear el producto.
+    //
+    // Esto evita duplicados incluso si Shopify crea el producto pero falla
+    // posteriormente la actualización del SKU de la variante.
     const duplicateQuery = `
-      query FindProductBySku($query: String!) {
-        productVariants(first: 10, query: $query) {
+      query FindExistingProduct($variantQuery: String!, $productQuery: String!) {
+        productVariants(first: 10, query: $variantQuery) {
           nodes {
             id
             sku
@@ -102,6 +105,24 @@ export async function POST(request: NextRequest) {
               title
               handle
               status
+            }
+          }
+        }
+
+        products(first: 10, query: $productQuery) {
+          nodes {
+            id
+            title
+            handle
+            status
+            metafield(namespace: "custom", key: "source_sku") {
+              value
+            }
+            variants(first: 1) {
+              nodes {
+                id
+                sku
+              }
             }
           }
         }
@@ -119,7 +140,8 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           query: duplicateQuery,
           variables: {
-            query: `sku:${product.sku}`,
+            variantQuery: `sku:${product.sku}`,
+            productQuery: `metafields.custom.source_sku:${product.sku}`,
           },
         }),
       }
@@ -131,32 +153,53 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
-          error: "No pudimos verificar si el SKU ya existe en Shopify.",
+          error: "No pudimos verificar si el producto ya existe en Shopify.",
           details: duplicateResult.errors || duplicateResult,
         },
         { status: 502 }
       );
     }
 
+    const normalizedSku = product.sku.trim().toUpperCase();
+
     const existingVariant =
       duplicateResult.data?.productVariants?.nodes?.find(
         (variant: { sku?: string | null }) =>
-          String(variant?.sku || "").trim().toUpperCase() ===
-          product.sku.trim().toUpperCase()
+          String(variant?.sku || "").trim().toUpperCase() === normalizedSku
       );
 
-    if (existingVariant) {
+    const existingSourceProduct =
+      duplicateResult.data?.products?.nodes?.find(
+        (shopifyProduct: {
+          metafield?: { value?: string | null } | null;
+        }) =>
+          String(shopifyProduct?.metafield?.value || "")
+            .trim()
+            .toUpperCase() === normalizedSku
+      );
+
+    if (existingVariant || existingSourceProduct) {
+      const existingProduct =
+        existingVariant?.product || existingSourceProduct;
+
+      const existingVariantId =
+        existingVariant?.id ||
+        existingSourceProduct?.variants?.nodes?.[0]?.id;
+
       return NextResponse.json(
         {
           ok: false,
           duplicate: true,
+          duplicateDetectedBy: existingVariant
+            ? "variant_sku"
+            : "source_sku",
           error: `${product.sku} ya existe en Shopify. No se creó un duplicado.`,
           shopify: {
-            productId: existingVariant.product?.id,
-            variantId: existingVariant.id,
-            title: existingVariant.product?.title,
-            handle: existingVariant.product?.handle,
-            status: existingVariant.product?.status,
+            productId: existingProduct?.id,
+            variantId: existingVariantId,
+            title: existingProduct?.title,
+            handle: existingProduct?.handle,
+            status: existingProduct?.status,
           },
         },
         { status: 409 }
@@ -168,46 +211,9 @@ export async function POST(request: NextRequest) {
 
     const title = commercialContent.title;
 
-    const specs = [
-      ["SKU", product.sku],
-      ["Colección", product.collection],
-      ["Género", product.gender],
-      ["Tamaño de caja", product.case_size],
-      ["Material de caja", product.case_material],
-      ["Material del bisel", product.bezel_material],
-      ["Color del bisel", product.bezel_color],
-      ["Corona", product.crown_type],
-      ["Cristal", product.crystal_type],
-      ["Material del dial", product.dial_material],
-      ["Calibre", product.caliber],
-      ["Movimiento", product.movement],
-      [
-        "Resistencia al agua",
-        product.water_resistance &&
-        /^(\d+(?:\.\d+)?)\s*(ATM|BAR|M|METERS?|METROS?)$/i.test(
-          String(product.water_resistance).trim()
-        )
-          ? product.water_resistance
-          : null,
-      ],
-      ["Material de correa", product.band_material],
-      ["Color de correa", product.band_tone],
-      ["Largo de correa", product.band_length],
-      ["Ancho de correa", product.band_size],
-    ].filter(([, value]) => value);
-
-    const specificationsHtml = specs
-      .map(
-        ([label, value]) =>
-          `<li><strong>${label}:</strong> ${value}</li>`
-      )
-      .join("");
-
-    const descriptionHtml = `
-      ${commercialContent.descriptionHtml}
-      <h3>Detalles técnicos</h3>
-      <ul>${specificationsHtml}</ul>
-    `;
+    // La descripción de Shopify contiene únicamente contenido comercial.
+    // Las especificaciones técnicas se enviarán como metafields.
+    const descriptionHtml = commercialContent.descriptionHtml;
 
     const rawImages = Array.isArray(product.raw_data?.images)
       ? product.raw_data.images
@@ -222,6 +228,68 @@ export async function POST(request: NextRequest) {
           typeof url === "string" && url.trim().length > 0
       )
       .filter((url, index, array) => array.indexOf(url) === index);
+
+    // Metacampos técnicos.
+    // La fuente de verdad es Technomarine/Supabase, no Gemini.
+    const metafieldSources = [
+      // Identificador permanente para evitar duplicados incluso si falla
+      // posteriormente la asignación del SKU a la variante.
+      ["source_sku", product.sku],
+      ["collection", product.collection],
+      ["gender", product.gender],
+      ["case_size", product.case_size],
+      ["case_material", product.case_material],
+      ["bezel_material", product.bezel_material],
+      ["bezel_color", product.bezel_color],
+      ["crown_type", product.crown_type],
+      ["crystal_type", product.crystal_type],
+      ["dial_material", product.dial_material],
+      ["caliber", product.caliber],
+      ["movement", product.movement],
+      ["water_resistance", product.water_resistance],
+      ["band_material", product.band_material],
+      ["band_tone", product.band_tone],
+      ["band_length", product.band_length],
+      ["band_size", product.band_size],
+    ] as const;
+
+    // Evita enviar valores técnicos vacíos o evidentemente mal formados.
+    // Nunca corregimos ni inventamos una especificación: si hay duda, se omite.
+    const isValidTechnicalMetafield = (
+      key: string,
+      value: unknown
+    ): boolean => {
+      if (
+        value === null ||
+        value === undefined ||
+        String(value).trim().length === 0
+      ) {
+        return false;
+      }
+
+      const normalizedValue = String(value).trim();
+
+      if (key === "water_resistance") {
+        // Ejemplo detectado en origen: "5ATMm".
+        // Aceptamos únicamente formatos reconocibles como ATM, m/metros o bar.
+        return /^(\d+(?:\.\d+)?)\s*(ATM|M|METERS?|METROS?|BAR)$/i.test(
+          normalizedValue
+        );
+      }
+
+      return true;
+    };
+
+    const metafields = metafieldSources
+      .filter(([key, value]) =>
+        isValidTechnicalMetafield(key, value)
+      )
+      .map(([key, value]) => ({
+        namespace: "custom",
+        key,
+        type: "single_line_text_field",
+        value: String(value).trim(),
+      }));
 
     const productInput = {
       title,
@@ -238,6 +306,9 @@ export async function POST(request: NextRequest) {
         title: commercialContent.seo.title,
         description: commercialContent.seo.description,
       },
+
+      // Especificaciones técnicas provenientes de Technomarine/Supabase.
+      metafields,
     };
 
     const createMutation = `
