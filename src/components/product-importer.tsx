@@ -79,8 +79,13 @@ export default function ProductImporter() {
     setItems(initialItems);
     setRunning(true);
 
+    const productsToSave: NonNullable<ImportItem["product"]>[] = [];
+
     for (const current of initialItems) {
-      if (current.status === "completed") continue;
+      if (current.status === "completed" && current.product) {
+        productsToSave.push(current.product);
+        continue;
+      }
 
       setItems((previous) =>
         previous.map((item) =>
@@ -100,6 +105,8 @@ export default function ProductImporter() {
         if (!response.ok || !data.success) {
           throw new Error(data.error || "No se pudo procesar el producto");
         }
+
+        productsToSave.push(data.product);
 
         setItems((previous) =>
           previous.map((item) =>
@@ -131,7 +138,39 @@ export default function ProductImporter() {
       }
     }
 
-    setRunning(false);
+    try {
+      if (productsToSave.length > 0) {
+        const saveResponse = await fetch("/api/imports/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: `UltraMaison - ${new Date().toLocaleDateString("es-PY")}`,
+            products: productsToSave,
+          }),
+        });
+
+        const saveData = await saveResponse.json();
+
+        if (!saveResponse.ok) {
+          throw new Error(
+            saveData.error || "No se pudo guardar la importación en Supabase"
+          );
+        }
+
+        console.log("Importación guardada:", saveData);
+      }
+    } catch (error) {
+      console.error("Error guardando en Supabase:", error);
+      alert(
+        error instanceof Error
+          ? `Los productos se procesaron, pero no se pudieron guardar: ${error.message}`
+          : "Los productos se procesaron, pero no se pudieron guardar en Supabase."
+      );
+    } finally {
+      setRunning(false);
+    }
   }
 
   function reset() {
@@ -265,6 +304,48 @@ TM-719022`}
                     Procesar productos
                   </>
                 )}
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const response = await fetch("/api/exports/shopify-csv");
+
+                    if (!response.ok) {
+                      const data = await response.json().catch(() => null);
+                      throw new Error(
+                        data?.error || `Error al exportar (${response.status})`
+                      );
+                    }
+
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+
+                    const link = document.createElement("a");
+                    link.href = url;
+                    link.download = `ultramaison-shopify-${new Date()
+                      .toISOString()
+                      .slice(0, 10)}.csv`;
+
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+
+                    window.URL.revokeObjectURL(url);
+                  } catch (error) {
+                    console.error("Error exportando Shopify CSV:", error);
+                    alert(
+                      error instanceof Error
+                        ? error.message
+                        : "No se pudo exportar el CSV."
+                    );
+                  }
+                }}
+                disabled={running}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#4770DB] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#0E81F0] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Exportar Shopify CSV
               </button>
             </div>
           </div>
