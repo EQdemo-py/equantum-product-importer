@@ -42,6 +42,17 @@ type ImportItem = {
   shopifyStatus?: "idle" | "sending" | "sent" | "error";
   shopifyError?: string;
   shopifyProductId?: string;
+  aiStatus?: "idle" | "generating" | "ready" | "error";
+  aiError?: string;
+  aiContent?: {
+    title: string;
+    shortDescription: string;
+    descriptionHtml: string;
+    validation: {
+      approved: boolean;
+      notes: string;
+    };
+  };
 };
 
 function extractSkus(value: string) {
@@ -54,6 +65,7 @@ export default function ProductImporter() {
   const [items, setItems] = useState<ImportItem[]>([]);
   const [running, setRunning] = useState(false);
   const [sendingSku, setSendingSku] = useState<string | null>(null);
+  const [generatingSku, setGeneratingSku] = useState<string | null>(null);
 
   const detectedSkus = useMemo(() => extractSkus(input), [input]);
 
@@ -174,6 +186,70 @@ export default function ProductImporter() {
       );
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function generateWithGemini(sku: string) {
+    if (generatingSku) return;
+
+    setGeneratingSku(sku);
+
+    setItems((previous) =>
+      previous.map((item) =>
+        item.sku === sku
+          ? {
+              ...item,
+              aiStatus: "generating",
+              aiError: undefined,
+            }
+          : item
+      )
+    );
+
+    try {
+      const response = await fetch("/api/ai/test-product", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sku }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "Gemini no pudo generar el contenido.");
+      }
+
+      setItems((previous) =>
+        previous.map((item) =>
+          item.sku === sku
+            ? {
+                ...item,
+                aiStatus: "ready",
+                aiContent: data.commercialContent,
+                aiError: undefined,
+              }
+            : item
+        )
+      );
+    } catch (error) {
+      setItems((previous) =>
+        previous.map((item) =>
+          item.sku === sku
+            ? {
+                ...item,
+                aiStatus: "error",
+                aiError:
+                  error instanceof Error
+                    ? error.message
+                    : "Error generando contenido con Gemini.",
+              }
+            : item
+        )
+      );
+    } finally {
+      setGeneratingSku(null);
     }
   }
 
@@ -608,6 +684,140 @@ TM-719022`}
                 </tbody>
               </table>
             </div>
+
+            {items
+              .filter((item) => item.status === "completed")
+              .map((item) => (
+                <div
+                  key={`ai-${item.sku}`}
+                  className="border-t border-slate-200 px-6 py-6"
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-bold text-violet-700">
+                          GEMINI AI
+                        </span>
+                        <span className="font-mono text-xs text-slate-400">
+                          {item.sku}
+                        </span>
+                      </div>
+
+                      <h4 className="mt-3 text-lg font-semibold">
+                        Contenido comercial
+                      </h4>
+                      <p className="mt-1 text-sm text-slate-500">
+                        Gemini mejora el título y la descripción usando únicamente
+                        los datos técnicos obtenidos del producto.
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => generateWithGemini(item.sku)}
+                      disabled={Boolean(generatingSku)}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {item.aiStatus === "generating" ? (
+                        <>
+                          <Loader2 size={16} className="animate-spin" />
+                          Generando...
+                        </>
+                      ) : item.aiStatus === "ready" ? (
+                        <>
+                          <RotateCcw size={16} />
+                          Regenerar con Gemini
+                        </>
+                      ) : (
+                        <>✨ Generar con Gemini</>
+                      )}
+                    </button>
+                  </div>
+
+                  {item.aiStatus === "error" && (
+                    <div className="mt-5 rounded-xl border border-red-200 bg-red-50 p-4">
+                      <p className="text-sm font-semibold text-red-700">
+                        No se pudo generar el contenido
+                      </p>
+                      <p className="mt-1 text-sm text-red-600">
+                        {item.aiError}
+                      </p>
+                    </div>
+                  )}
+
+                  {item.aiStatus === "ready" && item.aiContent && (
+                    <div className="mt-6 grid gap-4">
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
+                        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                          Título sugerido
+                        </p>
+                        <p className="mt-2 text-lg font-semibold">
+                          {item.aiContent.title}
+                        </p>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-white p-5">
+                        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                          Descripción corta
+                        </p>
+                        <p className="mt-2 text-sm leading-6 text-slate-700">
+                          {item.aiContent.shortDescription}
+                        </p>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-white p-5">
+                        <p className="text-xs font-bold uppercase tracking-wide text-slate-400">
+                          Descripción comercial
+                        </p>
+                        <div
+                          className="mt-3 space-y-3 text-sm leading-7 text-slate-700"
+                          dangerouslySetInnerHTML={{
+                            __html: item.aiContent.descriptionHtml,
+                          }}
+                        />
+                      </div>
+
+                      <div
+                        className={`rounded-xl border p-4 ${
+                          item.aiContent.validation.approved
+                            ? "border-emerald-200 bg-emerald-50"
+                            : "border-amber-200 bg-amber-50"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          {item.aiContent.validation.approved ? (
+                            <CheckCircle2
+                              size={18}
+                              className="text-emerald-700"
+                            />
+                          ) : (
+                            <CircleAlert
+                              size={18}
+                              className="text-amber-700"
+                            />
+                          )}
+
+                          <p
+                            className={`text-sm font-semibold ${
+                              item.aiContent.validation.approved
+                                ? "text-emerald-800"
+                                : "text-amber-800"
+                            }`}
+                          >
+                            {item.aiContent.validation.approved
+                              ? "Contenido validado"
+                              : "Requiere revisión"}
+                          </p>
+                        </div>
+
+                        <p className="mt-2 text-sm text-slate-600">
+                          {item.aiContent.validation.notes}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
           </section>
         )}
       </div>
