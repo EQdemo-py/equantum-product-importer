@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import crypto from "node:crypto";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
 
@@ -88,27 +89,39 @@ export async function GET(request: NextRequest) {
       throw new Error("Shopify no entregó el access token.");
     }
 
+    const supabase = createServerSupabaseClient();
+
+    const { error: saveError } = await supabase
+      .from("shopify_connections")
+      .upsert(
+        {
+          shop,
+          access_token: tokenData.access_token,
+          scopes: tokenData.scope ?? "",
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "shop",
+        }
+      );
+
+    if (saveError) {
+      console.error("Error guardando conexión Shopify:", saveError);
+      throw new Error(
+        `No se pudo guardar la conexión de Shopify: ${saveError.message}`
+      );
+    }
+
     const response = NextResponse.json({
       ok: true,
-      message: "UltraMaison conectada correctamente con Shopify.",
+      message: "UltraMaison conectada permanentemente con Shopify.",
       shop,
       scope: tokenData.scope ?? "",
-      next: "La conexión funciona. Ahora podemos probar la creación de un producto Draft.",
+      saved: true,
     });
 
-    response.cookies.set(
-      "shopify_access_token",
-      tokenData.access_token,
-      {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-        maxAge: 60 * 60,
-        path: "/",
-      }
-    );
-
     response.cookies.delete("shopify_oauth_state");
+    response.cookies.delete("shopify_access_token");
 
     return response;
   } catch (error) {

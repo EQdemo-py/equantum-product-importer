@@ -39,6 +39,9 @@ type ImportItem = {
     };
   };
   error?: string;
+  shopifyStatus?: "idle" | "sending" | "sent" | "error";
+  shopifyError?: string;
+  shopifyProductId?: string;
 };
 
 function extractSkus(value: string) {
@@ -50,6 +53,7 @@ export default function ProductImporter() {
   const [input, setInput] = useState("");
   const [items, setItems] = useState<ImportItem[]>([]);
   const [running, setRunning] = useState(false);
+  const [sendingSku, setSendingSku] = useState<string | null>(null);
 
   const detectedSkus = useMemo(() => extractSkus(input), [input]);
 
@@ -170,6 +174,81 @@ export default function ProductImporter() {
       );
     } finally {
       setRunning(false);
+    }
+  }
+
+  async function sendToShopify(sku: string) {
+    if (sendingSku) return;
+
+    setSendingSku(sku);
+
+    setItems((previous) =>
+      previous.map((item) =>
+        item.sku === sku
+          ? {
+              ...item,
+              shopifyStatus: "sending",
+              shopifyError: undefined,
+            }
+          : item
+      )
+    );
+
+    try {
+      const response = await fetch("/api/shopify/send-product", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ sku }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        const details = Array.isArray(data.details)
+          ? data.details
+              .map((detail: { message?: string }) => detail?.message)
+              .filter(Boolean)
+              .join(" | ")
+          : "";
+
+        throw new Error(
+          details
+            ? `${data.error || "Shopify rechazó el producto"} ${details}`
+            : data.error || "No se pudo enviar a Shopify."
+        );
+      }
+
+      setItems((previous) =>
+        previous.map((item) =>
+          item.sku === sku
+            ? {
+                ...item,
+                shopifyStatus: "sent",
+                shopifyProductId: data.shopify?.productId,
+                shopifyError: undefined,
+              }
+            : item
+        )
+      );
+    } catch (error) {
+      setItems((previous) =>
+        previous.map((item) =>
+          item.sku === sku
+            ? {
+                ...item,
+                shopifyStatus: "error",
+                shopifyError:
+                  error instanceof Error
+                    ? error.message
+                    : "Error enviando a Shopify.",
+              }
+            : item
+        )
+      );
+    } finally {
+      setSendingSku(null);
     }
   }
 
@@ -374,7 +453,7 @@ TM-719022`}
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[900px] text-left">
+              <table className="w-full min-w-[1100px] text-left">
                 <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-6 py-4 font-semibold">Producto</th>
@@ -383,6 +462,7 @@ TM-719022`}
                     <th className="px-4 py-4 font-semibold">Precio fuente</th>
                     <th className="px-4 py-4 font-semibold">Imágenes</th>
                     <th className="px-6 py-4 font-semibold">Estado</th>
+                    <th className="px-6 py-4 font-semibold">Shopify</th>
                   </tr>
                 </thead>
 
@@ -470,6 +550,57 @@ TM-719022`}
                               </p>
                             )}
                           </div>
+                        )}
+                      </td>
+
+                      <td className="px-6 py-4">
+                        {item.status !== "completed" ? (
+                          <span className="text-xs text-slate-400">
+                            No disponible
+                          </span>
+                        ) : item.shopifyStatus === "sent" ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
+                              <CheckCircle2 size={12} />
+                              Enviado
+                            </span>
+                            <p className="mt-1 text-xs text-slate-400">
+                              Borrador en Shopify
+                            </p>
+                          </div>
+                        ) : item.shopifyStatus === "error" ? (
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => sendToShopify(item.sku)}
+                              disabled={Boolean(sendingSku)}
+                              className="rounded-xl bg-red-50 px-4 py-2.5 text-xs font-semibold text-red-700 disabled:opacity-50"
+                            >
+                              Reintentar
+                            </button>
+
+                            {item.shopifyError && (
+                              <p className="mt-2 max-w-[220px] text-xs text-red-600">
+                                {item.shopifyError}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => sendToShopify(item.sku)}
+                            disabled={Boolean(sendingSku)}
+                            className="inline-flex whitespace-nowrap items-center gap-2 rounded-xl bg-[#4770DB] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-[#0E81F0] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {item.shopifyStatus === "sending" ? (
+                              <>
+                                <Loader2 size={14} className="animate-spin" />
+                                Enviando...
+                              </>
+                            ) : (
+                              <>Enviar a Shopify</>
+                            )}
+                          </button>
                         )}
                       </td>
                     </tr>
