@@ -226,16 +226,18 @@ export async function POST(request: NextRequest) {
     const productInput = {
       title,
       descriptionHtml,
-      vendor: "Technomarine",
-      productType: "Reloj",
+
+      // Campos comerciales preparados y validados por Gemini.
+      vendor: commercialContent.vendor,
+      productType: commercialContent.productType,
       status: "DRAFT",
-      tags: [
-        "Technomarine",
-        product.collection,
-        product.series,
-        product.gender,
-        product.sku,
-      ].filter(Boolean),
+
+      tags: commercialContent.tags,
+
+      seo: {
+        title: commercialContent.seo.title,
+        description: commercialContent.seo.description,
+      },
     };
 
     const createMutation = `

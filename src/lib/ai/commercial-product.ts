@@ -24,6 +24,14 @@ export type CommercialProductContent = {
   title: string;
   shortDescription: string;
   descriptionHtml: string;
+  productType: string;
+  vendor: string;
+  collection: string;
+  tags: string[];
+  seo: {
+    title: string;
+    description: string;
+  };
   validation: {
     approved: boolean;
     notes: string;
@@ -200,6 +208,20 @@ Technomarine Lusso Mare Men 44.00mm – TM-226002
 16. validation.approved debe ser TRUE solamente si no inventaste,
     interpretaste ni contradijiste ningún dato.
 
+CAMPOS PARA SHOPIFY:
+
+17. productType debe ser exactamente "Reloj".
+18. vendor debe ser exactamente "Technomarine".
+19. collection debe copiar EXACTAMENTE la colección recibida en los datos.
+20. tags debe contener solamente datos comprobables del producto.
+21. Podés usar como tags: SKU, Technomarine, colección, género, medida,
+    material de caja, movimiento, calibre y material de correa cuando existan.
+22. NO inventes tags.
+23. seo.title debe ser natural, comercial y contener el SKU exacto.
+24. seo.description debe ser una descripción breve para Google basada
+    exclusivamente en información real del producto.
+25. NO generes precio, inventario, peso, código de barras ni país de origen.
+
 ${sourceWarning}
 
 Respondé EXCLUSIVAMENTE JSON:
@@ -208,6 +230,18 @@ Respondé EXCLUSIVAMENTE JSON:
   "title": "Nombre comercial",
   "shortDescription": "Resumen comercial de máximo 260 caracteres",
   "descriptionHtml": "<p>Descripción comercial...</p>",
+  "productType": "Reloj",
+  "vendor": "Technomarine",
+  "collection": "Colección exacta de la fuente",
+  "tags": [
+    "Technomarine",
+    "SKU",
+    "Colección"
+  ],
+  "seo": {
+    "title": "Título SEO con SKU",
+    "description": "Meta descripción comercial"
+  },
   "validation": {
     "approved": true,
     "notes": "Contenido contrastado con la ficha original."
@@ -249,6 +283,21 @@ ${JSON.stringify(
   generated.descriptionHtml = String(
     generated.descriptionHtml || ""
   ).trim();
+
+  generated.productType = String(generated.productType || "").trim();
+  generated.vendor = String(generated.vendor || "").trim();
+  generated.collection = String(generated.collection || "").trim();
+
+  generated.tags = Array.isArray(generated.tags)
+    ? generated.tags
+        .map((tag) => String(tag || "").trim())
+        .filter(Boolean)
+    : [];
+
+  generated.seo = {
+    title: String(generated.seo?.title || "").trim(),
+    description: String(generated.seo?.description || "").trim(),
+  };
 
   const exactSku = product.sku.trim();
 
@@ -292,6 +341,42 @@ ${JSON.stringify(
 
   if (!generated.descriptionHtml) {
     throw new Error("La IA no generó la descripción.");
+  }
+
+  if (generated.productType !== "Reloj") {
+    throw new Error("Gemini devolvió un tipo de producto inválido.");
+  }
+
+  if (generated.vendor !== "Technomarine") {
+    throw new Error("Gemini devolvió un proveedor inválido.");
+  }
+
+  if (
+    product.collection &&
+    generated.collection.toLowerCase() !==
+      product.collection.trim().toLowerCase()
+  ) {
+    throw new Error("Gemini modificó la colección original.");
+  }
+
+  if (!generated.tags.length) {
+    throw new Error("Gemini no generó etiquetas válidas.");
+  }
+
+  if (!generated.seo.title) {
+    throw new Error("Gemini no generó el título SEO.");
+  }
+
+  if (
+    !generated.seo.title
+      .toUpperCase()
+      .includes(exactSku.toUpperCase())
+  ) {
+    throw new Error("El título SEO no contiene el SKU exacto.");
+  }
+
+  if (!generated.seo.description) {
+    throw new Error("Gemini no generó la descripción SEO.");
   }
 
   if (generated.validation?.approved !== true) {
