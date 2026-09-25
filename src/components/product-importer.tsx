@@ -66,6 +66,8 @@ export default function ProductImporter() {
   const [running, setRunning] = useState(false);
   const [sendingSku, setSendingSku] = useState<string | null>(null);
   const [generatingSku, setGeneratingSku] = useState<string | null>(null);
+  const [bulkGenerating, setBulkGenerating] = useState(false);
+  const [bulkSending, setBulkSending] = useState(false);
 
   const detectedSkus = useMemo(() => extractSkus(input), [input]);
 
@@ -233,6 +235,11 @@ export default function ProductImporter() {
             : item
         )
       );
+
+      return {
+        ok: true,
+        approved: Boolean(data.commercialContent?.validation?.approved),
+      };
     } catch (error) {
       setItems((previous) =>
         previous.map((item) =>
@@ -248,6 +255,8 @@ export default function ProductImporter() {
             : item
         )
       );
+
+      return { ok: false, approved: false };
     } finally {
       setGeneratingSku(null);
     }
@@ -325,6 +334,62 @@ export default function ProductImporter() {
       );
     } finally {
       setSendingSku(null);
+    }
+  }
+
+  async function generateAllWithGemini() {
+    if (bulkGenerating || bulkSending) return;
+
+    const candidates = items.filter(
+      (item) => item.status === "completed" && item.aiStatus !== "ready"
+    );
+
+    if (!candidates.length) return;
+
+    setBulkGenerating(true);
+
+    try {
+      for (const item of candidates) {
+        await generateWithGemini(item.sku);
+
+        // Pausa pequeña para no golpear la API de Gemini demasiado rápido.
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+    } finally {
+      setBulkGenerating(false);
+    }
+  }
+
+  async function sendApprovedToShopify() {
+    if (bulkSending || bulkGenerating) return;
+
+    const approvedItems = items.filter(
+      (item) =>
+        item.status === "completed" &&
+        item.aiStatus === "ready" &&
+        item.aiContent?.validation?.approved === true &&
+        item.shopifyStatus !== "sent"
+    );
+
+    if (!approvedItems.length) return;
+
+    const confirmed = window.confirm(
+      `Se enviarán ${approvedItems.length} productos aprobados a Shopify como borrador. ¿Continuar?`
+    );
+
+    if (!confirmed) return;
+
+    setBulkSending(true);
+
+    try {
+      for (const item of approvedItems) {
+        await sendToShopify(item.sku);
+
+        // Shopify se procesa en cola para evitar llamadas simultáneas.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    } finally {
+      setBulkSending(false);
     }
   }
 
@@ -525,6 +590,132 @@ TM-719022`}
                   <RotateCcw size={15} />
                   Reintentar errores
                 </button>
+              )}
+            </div>
+
+            <div className="border-b border-slate-200 bg-slate-50/70 px-6 py-5">
+              <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+                <div>
+                  <h4 className="font-semibold">Automatización masiva</h4>
+                  <p className="mt-1 text-sm text-slate-500">
+                    Generá el contenido de todos los productos con Gemini y enviá
+                    a Shopify únicamente los aprobados.
+                  </p>
+
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full bg-white px-3 py-1.5 font-semibold text-slate-600">
+                      {items.filter((item) => item.status === "completed").length} procesados
+                    </span>
+
+                    <span className="rounded-full bg-violet-50 px-3 py-1.5 font-semibold text-violet-700">
+                      {
+                        items.filter((item) => item.aiStatus === "ready").length
+                      } generados con Gemini
+                    </span>
+
+                    <span className="rounded-full bg-emerald-50 px-3 py-1.5 font-semibold text-emerald-700">
+                      {
+                        items.filter(
+                          (item) =>
+                            item.aiStatus === "ready" &&
+                            item.aiContent?.validation?.approved === true
+                        ).length
+                      } aprobados
+                    </span>
+
+                    <span className="rounded-full bg-blue-50 px-3 py-1.5 font-semibold text-blue-700">
+                      {
+                        items.filter((item) => item.shopifyStatus === "sent")
+                          .length
+                      } enviados
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={generateAllWithGemini}
+                    disabled={
+                      bulkGenerating ||
+                      bulkSending ||
+                      !items.some(
+                        (item) =>
+                          item.status === "completed" &&
+                          item.aiStatus !== "ready"
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {bulkGenerating ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Generando todos...
+                      </>
+                    ) : (
+                      <>✨ Generar todos con Gemini</>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={sendApprovedToShopify}
+                    disabled={
+                      bulkGenerating ||
+                      bulkSending ||
+                      !items.some(
+                        (item) =>
+                          item.aiStatus === "ready" &&
+                          item.aiContent?.validation?.approved === true &&
+                          item.shopifyStatus !== "sent"
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-xl bg-[#02080D] px-5 py-3 text-sm font-semibold text-white transition hover:bg-[#0E81F0] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {bulkSending ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        Enviando aprobados...
+                      </>
+                    ) : (
+                      <>Enviar aprobados a Shopify</>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {bulkGenerating && (
+                <div className="mt-4">
+                  <div className="mb-2 flex justify-between text-xs font-medium text-slate-500">
+                    <span>Gemini está procesando la cola</span>
+                    <span>
+                      {items.filter((item) => item.aiStatus === "ready").length} /{" "}
+                      {items.filter((item) => item.status === "completed").length}
+                    </span>
+                  </div>
+
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+                    <div
+                      className="h-full bg-violet-600 transition-all duration-500"
+                      style={{
+                        width: `${
+                          items.filter((item) => item.status === "completed")
+                            .length
+                            ? Math.round(
+                                (items.filter(
+                                  (item) => item.aiStatus === "ready"
+                                ).length /
+                                  items.filter(
+                                    (item) => item.status === "completed"
+                                  ).length) *
+                                  100
+                              )
+                            : 0
+                        }%`,
+                      }}
+                    />
+                  </div>
+                </div>
               )}
             </div>
 
